@@ -30,22 +30,27 @@ class vtkTimerCallback():
         self.timer_count = 0
 
     def execute(self, obj, event):
-        print(self.timer_count)
+        self.slicerB.SetNormal(sample_spherical(1))
+        self.optimizer.Update()
 
-        self.slicerA.SetNormal(sample_spherical(1))
-        self.slicerA.Update()
+        if self.timer_count % 5 == 0:
+            self.slicerA.SetNormal(sample_spherical(1))
 
-        normal = self.slicerA.GetNormal()
-        spherical = cart2sph(normal)
-        self.slicerActorA.SetOrientation(0,0,0)
-        self.slicerActorA.RotateY(spherical[1] * 180 / np.pi)
-        self.slicerActorA.RotateZ(-spherical[0] * 180 / np.pi)
 
-        normal = self.slicerB.GetNormal()
-        spherical = cart2sph(normal)
-        self.slicerActorB.SetOrientation(0,0,0)
-        self.slicerActorB.RotateY(spherical[1] * 180 / np.pi)
-        self.slicerActorB.RotateZ(-spherical[0] * 180 / np.pi)
+        self.tfFilter.SetTransform(self.optimizer.icp)
+        self.tfFilter.Update()
+
+        # normal = self.slicerA.GetNormal()
+        # spherical = cart2sph(normal)
+        # self.slicerActorA.SetOrientation(0,0,0)
+        # self.slicerActorA.RotateY(spherical[1] * 180 / np.pi)
+        # self.slicerActorA.RotateZ(-spherical[0] * 180 / np.pi)
+
+        # normal = self.slicerB.GetNormal()
+        # spherical = cart2sph(normal)
+        # self.slicerActorB.SetOrientation(0,0,0)
+        # self.slicerActorB.RotateY(spherical[1] * 180 / np.pi)
+        # self.slicerActorB.RotateZ(-spherical[0] * 180 / np.pi)
 
         iren = obj
         iren.GetRenderWindow().Render()
@@ -106,7 +111,6 @@ class SlicerAlgorithm(VTKPythonAlgorithmBase):
         assert(len(normalArray) == 3)
         origin = self.GetOrigin()
         normalNew = normalArray + origin
-        print(normalNew)
         self._normalLine.SetPoint(1, normalNew[0], normalNew[1], normalNew[2])
 
     def GetNormal(self):
@@ -126,9 +130,45 @@ class SlicerAlgorithm(VTKPythonAlgorithmBase):
     def GetOrigin(self):
         return np.array(self._normalLine.GetPoints().GetPoint(0))
 
+class SlicerOptimizer(VTKPythonAlgorithmBase):
+    def __init__(self):
+        VTKPythonAlgorithmBase.__init__(self,
+            nInputPorts=2,
+            nOutputPorts=1, outputType='vtkPolyData')
+
+        
+        self.icp = vtk.vtkIterativeClosestPointTransform()
+
+    def RequestData(self, request, inInfo, outInfo):
+        target = vtk.vtkDataSet.GetData(inInfo[0])
+        source = vtk.vtkDataSet.GetData(inInfo[1])
+        opt = vtk.vtkPolyData.GetData(outInfo)
+        self.icp.SetSource(source)
+        self.icp.SetTarget(target)
+        # self.icp.GetLandmarkTransform().SetModeToRigidBody()
+        self.icp.GetLandmarkTransform().SetModeToSimilarity ()
+        self.icp.SetMaximumNumberOfIterations(500)
+        self.icp.StartByMatchingCentroidsOn()
+        self.icp.Modified()
+        self.icp.Update()
+
+        # print(self.icp.GetMatrix())
+
+        tfFilter = vtk.vtkTransformPolyDataFilter()
+        tfFilter.SetInputData(source)
+        tfFilter.SetTransform(self.icp)
+        tfFilter.Update()
+
+
+        opt.ShallowCopy(tfFilter.GetOutput())
+
+        return 1
+
+
+
 def main():
     # random.seed=1
-    inputFilename, numberOfCuts = get_program_parameters()
+    inputFilename = "Hulk.stl"# , numberOfCuts = get_program_parameters()
 
     colors = vtk.vtkNamedColors()
 
@@ -154,8 +194,13 @@ def main():
     slicerB.SetInputConnection(0, reader.GetOutputPort())
     slicerB.Update()
 
+    optimizer = SlicerOptimizer()
+    optimizer.SetInputConnection(0, slicerA.GetOutputPort())
+    optimizer.SetInputConnection(1, slicerB.GetOutputPort())
+    optimizer.Update()
+
     slicerMapperB = vtk.vtkPolyDataMapper()
-    slicerMapperB.SetInputConnection(slicerB.GetOutputPort())
+    slicerMapperB.SetInputConnection(optimizer.GetOutputPort())
          
     #create cutter actor
     slicerActorB = vtk.vtkActor()
@@ -171,11 +216,24 @@ def main():
     modelActor.GetProperty().SetColor(colors.GetColor3d("Flesh"))
     modelActor.SetMapper(modelMapper)
 
+    tfFilter = vtk.vtkTransformPolyDataFilter()
+    tfFilter.SetInputData(reader.GetOutput())
+    tfFilter.SetTransform(optimizer.icp)
+    tfFilter.Update()
+
+    modelMapper2 = vtk.vtkPolyDataMapper()
+    modelMapper2.SetInputConnection(tfFilter.GetOutputPort())
+
+    modelActor2 = vtk.vtkActor()
+    modelActor2.GetProperty().SetColor(colors.GetColor3d("Flesh"))
+    modelActor2.SetMapper(modelMapper2)
+
     # Create renderers and add the cutter and model actors.
     renderer = vtk.vtkRenderer()
     renderer.AddActor(slicerActorA)
     renderer.AddActor(slicerActorB)
-    # renderer.AddActor(modelActor)
+    renderer.AddActor(modelActor)
+    renderer.AddActor(modelActor2)
 
     # Add renderer to renderwindow and render
     renderWindow = vtk.vtkRenderWindow()
@@ -204,8 +262,10 @@ def main():
     cb.slicerActorB = slicerActorB
     cb.slicerA = slicerA
     cb.slicerB = slicerB
+    cb.tfFilter = tfFilter
+    cb.optimizer = optimizer
     interactor.AddObserver('TimerEvent', cb.execute)
-    interactor.CreateRepeatingTimer(500)
+    interactor.CreateRepeatingTimer(10)
 
     interactor.Start()
 
